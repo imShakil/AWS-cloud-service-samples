@@ -1,7 +1,7 @@
 template-file-path: cloudformation/ec2/ec2-sea.yml
 parameters:
   InstanceType: t2.micro
-  KeyName: my-key-pair
+  KeyName: react-app-key.pem
   SSHLocation: 0.0.0.0/0
 tags:
   Environment: dev
