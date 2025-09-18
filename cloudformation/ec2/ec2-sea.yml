@@ -36,21 +36,15 @@ Mappings:
       Arch: HVM64
 
   AWSRegionArch2AMI:
-    us-east-1:
-      HVM64: ami-0c02fb55956c7d316
-    us-west-2:
-      HVM64: ami-0c02fb55956c7d316
-    us-west-1:
-      HVM64: ami-0c02fb55956c7d316
-    eu-west-1:
-      HVM64: ami-0c02fb55956c7d316
+    ap-southeast-1:
+      HVM64: ami-05fd46f12b86c4a6c
 
 Resources:
   # VPC
   MyVPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: 10.0.0.0/16
+      CidrBlock: 10.10.0.0/16
       EnableDnsHostnames: true
       EnableDnsSupport: true
       Tags:
@@ -77,7 +71,7 @@ Resources:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref MyVPC
-      CidrBlock: 10.0.1.0/24
+      CidrBlock: 10.10.1.0/24
       AvailabilityZone: !Select [0, !GetAZs '']
       MapPublicIpOnLaunch: true
       Tags:
