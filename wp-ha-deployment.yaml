@@ -1,4 +1,4 @@
-template-file-path: cloudformation/wordpress-high-availability
+template-file-path: cloudformation/wordpress-high-availability/network-stack.yaml
 parameters:
   InstanceType: t2.micro
   KeyName: react-app-key
