@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'WordPress High Availability with Autoscaling (No EFS)'
+Description: 'Wordpress High Availability with Autoscaling'
 
 Parameters:
   RDSMasterPassword:
@@ -189,6 +189,32 @@ Resources:
           FromPort: 3306
           ToPort: 3306
           SourceSecurityGroupId: !Ref WebServerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda function
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          DestinationSecurityGroupId: !Ref DBSecurityGroup
+
+  # Store RDS password in Secrets Manager
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: RDS Master Password
+      SecretString: !Sub |
+        {
+          "username": "Admin",
+          "password": "${RDSMasterPassword}"
+        }
 
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
@@ -202,18 +228,97 @@ Resources:
     Type: AWS::RDS::DBInstance
     Properties:
       DBName: "WPRDSDB25"
-      DBInstanceClass: db.t3.micro
+      DBInstanceClass: db.t3.small
       DBSubnetGroupName: !Ref DBSubnetGroup
       Engine: MySQL
-      MultiAZ: false
+      MultiAZ: true
       PubliclyAccessible: false
       AllocatedStorage: '20'
-      MasterUsername: RDSAdmin
+      StorageEncrypted: true
+      MasterUsername: Admin
       MasterUserPassword: !Ref RDSMasterPassword
       VPCSecurityGroups:
         - !Ref DBSecurityGroup
-      BackupRetentionPeriod: 0
-      DeletionProtection: false
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+      AutoMinorVersionUpgrade: true
+      EnableCloudwatchLogsExports:
+        - error
+        - general
+        - slow-query
+
+  # Lambda execution role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SecretsManagerAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecret
+
+  # Lambda function to initialize database
+  DBInitFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Code:
+        ZipFile: |
+          import pymysql
+          import boto3
+          import json
+          import cfnresponse
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Create':
+                      secrets_client = boto3.client('secretsmanager')
+                      secret = secrets_client.get_secret_value(SecretId=event['ResourceProperties']['SecretArn'])
+                      credentials = json.loads(secret['SecretString'])
+                      
+                      conn = pymysql.connect(
+                          host=event['ResourceProperties']['Host'],
+                          user=credentials['username'],
+                          password=credentials['password']
+                      )
+                      cursor = conn.cursor()
+                      cursor.execute("CREATE DATABASE IF NOT EXISTS wordpress")
+                      cursor.execute("CREATE USER IF NOT EXISTS 'wpuser'@'%' IDENTIFIED BY %s", (credentials['password'],))
+                      cursor.execute("GRANT ALL PRIVILEGES ON wordpress.* TO 'wpuser'@'%'")
+                      cursor.execute("FLUSH PRIVILEGES")
+                      conn.close()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+
+  # Custom resource to trigger DB initialization
+  DBInitCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: WordPressDB
+    Properties:
+      ServiceToken: !GetAtt DBInitFunction.Arn
+      Host: !GetAtt WordPressDB.Endpoint.Address
+      SecretArn: !Ref DBSecret
 
   # Application Load Balancer
   ApplicationLoadBalancer:
@@ -262,22 +367,27 @@ Resources:
             yum install -y httpd php php-mysql
             
             # Install WordPress
-            cd /var/www/html
+            cd /tmp
             wget https://wordpress.org/latest.tar.gz
-            tar -xzf latest.tar.gz --strip-components=1
+            tar -xzf latest.tar.gz
             
-            cp wp-config-sample.php wp-config.php
-            sed -i "s/database_name_here/WPRDSDB25/" wp-config.php
-            sed -i "s/username_here/RDSAdmin/" wp-config.php
-            sed -i "s/password_here/${RDSMasterPassword}/" wp-config.php
-            sed -i "s/localhost/${WordPressDB.Endpoint.Address}/" wp-config.php
+            if [ ! -f /var/www/html/wp-config.php ]; then
+              cp -r wordpress/* /var/www/html/
+              cd /var/www/html
+              cp wp-config-sample.php wp-config.php
+              
+              sed -i "s/database_name_here/wordpress/" wp-config.php
+              sed -i "s/username_here/wpuser/" wp-config.php
+              sed -i "s/password_here/${RDSMasterPassword}/" wp-config.php
+              sed -i "s/localhost/${WordPressDB.Endpoint.Address}/" wp-config.php
+            fi
             
             chown -R apache:apache /var/www/html
             chmod -R 755 /var/www/html
             systemctl enable httpd
             systemctl start httpd
 
-  # Auto Scaling Group (Free Tier: 1 instance)
+  # Auto Scaling Group
   AutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
@@ -309,3 +419,7 @@ Outputs:
   WebsiteURL:
     Description: WordPress Website URL
     Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+  
+  DatabaseName:
+    Description: WordPress Database Name
+    Value: wordpress

@@ -189,17 +189,21 @@ Resources:
           FromPort: 3306
           ToPort: 3306
           SourceSecurityGroupId: !Ref WebServerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
 
-  EFSSecurityGroup:
+  LambdaSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: Security group for EFS
+      GroupDescription: Security group for Lambda function
       VpcId: !Ref VPC
-      SecurityGroupIngress:
+      SecurityGroupEgress:
         - IpProtocol: tcp
-          FromPort: 2049
-          ToPort: 2049
-          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+          FromPort: 3306
+          ToPort: 3306
+          DestinationSecurityGroupId: !Ref DBSecurityGroup
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -215,37 +219,76 @@ Resources:
       DBInstanceClass: db.t3.micro
       DBSubnetGroupName: !Ref DBSubnetGroup
       Engine: MySQL
-      MultiAZ: false
+      MultiAZ: true
       PubliclyAccessible: false
       AllocatedStorage: '20'
+      StorageEncrypted: true
       MasterUsername: Admin
       MasterUserPassword: !Ref RDSMasterPassword
       VPCSecurityGroups:
         - !Ref DBSecurityGroup
-      BackupRetentionPeriod: 0
-      DeletionProtection: false
-    
-  # EFS for shared WordPress files
-  EFSFileSystem:
-    Type: AWS::EFS::FileSystem
-    Properties:
-      PerformanceMode: generalPurpose
 
-  EFSMountTarget1:
-    Type: AWS::EFS::MountTarget
+  # Lambda execution role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
     Properties:
-      FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PublicSubnet1
-      SecurityGroups:
-        - !Ref EFSSecurityGroup
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
 
-  EFSMountTarget2:
-    Type: AWS::EFS::MountTarget
+  # Lambda function to initialize database
+  DBInitFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PublicSubnet2
-      SecurityGroups:
-        - !Ref EFSSecurityGroup
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Code:
+        ZipFile: |
+          import pymysql
+          import cfnresponse
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Create':
+                      conn = pymysql.connect(
+                          host=event['ResourceProperties']['Host'],
+                          user=event['ResourceProperties']['MasterUser'],
+                          password=event['ResourceProperties']['MasterPassword']
+                      )
+                      cursor = conn.cursor()
+                      cursor.execute("CREATE DATABASE IF NOT EXISTS wordpress")
+                      cursor.execute("CREATE USER IF NOT EXISTS 'wpuser'@'%' IDENTIFIED BY %s", (event['ResourceProperties']['WPPassword'],))
+                      cursor.execute("GRANT ALL PRIVILEGES ON wordpress.* TO 'wpuser'@'%'")
+                      cursor.execute("FLUSH PRIVILEGES")
+                      conn.close()
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {}, str(e))
+      Layers:
+        - arn:aws:lambda:us-east-1:898466741470:layer:psycopg2-py38:2
+
+  # Custom resource to trigger DB initialization
+  DBInitCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: WordPressDB
+    Properties:
+      ServiceToken: !GetAtt DBInitFunction.Arn
+      Host: !GetAtt WordPressDB.Endpoint.Address
+      MasterUser: Admin
+      MasterPassword: !Ref RDSMasterPassword
+      WPPassword: !Ref RDSMasterPassword
 
   # Application Load Balancer
   ApplicationLoadBalancer:
@@ -291,12 +334,7 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             yum update -y
-            yum install -y httpd php php-mysql amazon-efs-utils
-            
-            # Mount EFS
-            mkdir -p /var/www/html
-            mount -t efs ${EFSFileSystem}:/ /var/www/html
-            echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /var/www/html efs defaults,_netdev" >> /etc/fstab
+            yum install -y httpd php php-mysql
             
             # Install WordPress
             cd /tmp
@@ -308,8 +346,8 @@ Resources:
               cd /var/www/html
               cp wp-config-sample.php wp-config.php
               
-              sed -i "s/database_name_here/WPRDSDB25/" wp-config.php
-              sed -i "s/username_here/RDSAdmin/" wp-config.php
+              sed -i "s/database_name_here/wprdsDb25/" wp-config.php
+              sed -i "s/username_here/admin/" wp-config.php
               sed -i "s/password_here/${RDSMasterPassword}/" wp-config.php
               sed -i "s/localhost/${WordPressDB.Endpoint.Address}/" wp-config.php
             fi
@@ -352,6 +390,6 @@ Outputs:
     Description: WordPress Website URL
     Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
   
-  EFSFileSystemId:
-    Description: EFS File System ID
-    Value: !Ref EFSFileSystem
+  DatabaseName:
+    Description: WordPress Database Name
+    Value: wordpress
