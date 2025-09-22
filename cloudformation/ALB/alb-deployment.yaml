@@ -1,0 +1,4 @@
+template-file-path: cloudformation/wordpress-high-availability/wp-ha.yaml
+parameters:
+  KeyName: ""
+

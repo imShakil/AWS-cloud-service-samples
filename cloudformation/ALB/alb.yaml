@@ -190,7 +190,7 @@ Resources:
             pip3 install requests
             pip3 install flask
             
-            wget https://gist.githubusercontent.com/imShakil/97f0b1156129bacd7d6b513dbc593a9f/raw/675a01d513dda61360eef8f5454ee280206814b1/app.py -O /home/ec2-user/app.py
+            wget https://gist.githubusercontent.com/imShakil/97f0b1156129bacd7d6b513dbc593a9f/raw/994aeabdb734b80e9b64f9cdff107f704b3e54ba/app.py -O /home/ec2-user/app.py
             nohup python3 /home/ec2-user/app.py > /home/ec2-user/app.log 2>&1 &
 
   AutoScalingGroup:
