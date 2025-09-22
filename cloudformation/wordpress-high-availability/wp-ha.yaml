@@ -1,0 +1,363 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Wordpress High Availability with Autoscaling'
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: '10.10.0.0/16'
+    Description: 'The CIDR block for the VPC'
+  
+  RDSMasterPassword:
+    Type: String
+    Description: The password for the RDS master user
+    NoEcho: true
+  
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: The name of an existing EC2 KeyPair to enable SSH access to the instances
+  
+  InstanceType:
+    Type: String
+    Default: 't2.micro'
+    Description: The EC2 instance type
+    AllowedValues:
+    - 't2.micro'
+    - 't2.small'
+    - 't2.medium'
+
+Mappings:
+  AWSInstanceType2Arch:
+    t2.micro:
+      Arch: HVM64
+    t2.small:
+      Arch: HVM64
+    t2.medium:
+      Arch: HVM64
+
+  AWSRegionArch2AMI:
+    ap-southeast-1:
+      HVM64: ami-05fd46f12b86c4a6c
+    us-east-1:
+      HVM64: ami-0c02fb55956c7d316
+    us-west-2:
+      HVM64: ami-0ceecbb0f30a902a6
+    eu-west-1:
+      HVM64: ami-0d71ea30463e0ff8d
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.10.1.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-pub-sub-AZ1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.10.2.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-pub-sub-AZ2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.10.3.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-pri-sub-AZ1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.10.4.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-pri-sub-AZ2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-pubRT
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-priRT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  # Security Groups
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for WordPress instances
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupDescription: "Database Security Group"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+
+  EFSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EFS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Database Subnet Group"
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Name: !Sub ${AWS::StackName}-vpc-db-subnet-grp
+
+  WordPressDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: "WPRDSDB25"
+      DBInstanceClass: db.t3.micro
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      Engine: MySQL
+      MultiAZ: false
+      PubliclyAccessible: false
+      AllocatedStorage: '20'
+      MasterUsername: RDSAdmin
+      MasterUserPassword: !Ref RDSMasterPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+    
+  # EFS for shared WordPress files
+  EFSFileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      PerformanceMode: generalPurpose
+
+  EFSMountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  EFSMountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EFSFileSystem
+      SubnetId: !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref EFSSecurityGroup
+
+  # Application Load Balancer
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Launch Template
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !FindInMap [AWSRegionArch2AMI, !Ref 'AWS::Region', !FindInMap [AWSInstanceType2Arch, !Ref InstanceType, Arch]]
+        InstanceType: !Ref InstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref WebServerSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            yum update -y
+            yum install -y httpd php php-mysql amazon-efs-utils
+            
+            # Mount EFS
+            mkdir -p /var/www/html
+            mount -t efs ${EFSFileSystem}:/ /var/www/html
+            echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /var/www/html efs defaults,_netdev" >> /etc/fstab
+            
+            # Install WordPress
+            cd /tmp
+            wget https://wordpress.org/latest.tar.gz
+            tar -xzf latest.tar.gz
+            
+            if [ ! -f /var/www/html/wp-config.php ]; then
+              cp -r wordpress/* /var/www/html/
+              cd /var/www/html
+              cp wp-config-sample.php wp-config.php
+              
+              sed -i "s/database_name_here/WPRDSDB25/" wp-config.php
+              sed -i "s/username_here/RDSAdmin/" wp-config.php
+              sed -i "s/password_here/${RDSMasterPassword}/" wp-config.php
+              sed -i "s/localhost/${WordPressDB.Endpoint.Address}/" wp-config.php
+            fi
+            
+            chown -R apache:apache /var/www/html
+            chmod -R 755 /var/www/html
+            systemctl enable httpd
+            systemctl start httpd
+
+  # Auto Scaling Group (Free Tier: 1 instance)
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 1
+      MaxSize: 2
+      DesiredCapacity: 1
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      TargetGroupARNs:
+        - !Ref ALBTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VpcId
+  
+  RDSEndpoint:
+    Value: !GetAtt WordPressDB.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-RDSEndpoint
+  
+  WebsiteURL:
+    Description: WordPress Website URL
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+  
+  EFSFileSystemId:
+    Description: EFS File System ID
+    Value: !Ref EFSFileSystem

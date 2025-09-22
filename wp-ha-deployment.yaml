@@ -1,4 +1,4 @@
-template-file-path: cloudformation/wordpress-high-availability/network-stack.yaml
+template-file-path: cloudformation/wordpress-high-availability/wp-ha.yaml
 parameters:
   VpcCidr: "10.10.0.0/16"
 tags:
