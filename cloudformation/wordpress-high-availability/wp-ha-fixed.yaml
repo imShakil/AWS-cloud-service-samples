@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'Wordpress High Availability with Autoscaling'
+Description: 'WordPress High Availability with Autoscaling (No EFS)'
 
 Parameters:
   RDSMasterPassword:
@@ -190,16 +190,6 @@ Resources:
           ToPort: 3306
           SourceSecurityGroupId: !Ref WebServerSecurityGroup
 
-  EFSSecurityGroup:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      GroupDescription: Security group for EFS
-      VpcId: !Ref VPC
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 2049
-          ToPort: 2049
-          SourceSecurityGroupId: !Ref WebServerSecurityGroup
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -218,34 +208,12 @@ Resources:
       MultiAZ: false
       PubliclyAccessible: false
       AllocatedStorage: '20'
-      MasterUsername: Admin
+      MasterUsername: RDSAdmin
       MasterUserPassword: !Ref RDSMasterPassword
       VPCSecurityGroups:
         - !Ref DBSecurityGroup
       BackupRetentionPeriod: 0
       DeletionProtection: false
-    
-  # EFS for shared WordPress files
-  EFSFileSystem:
-    Type: AWS::EFS::FileSystem
-    Properties:
-      PerformanceMode: generalPurpose
-
-  EFSMountTarget1:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PublicSubnet1
-      SecurityGroups:
-        - !Ref EFSSecurityGroup
-
-  EFSMountTarget2:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref EFSFileSystem
-      SubnetId: !Ref PublicSubnet2
-      SecurityGroups:
-        - !Ref EFSSecurityGroup
 
   # Application Load Balancer
   ApplicationLoadBalancer:
@@ -291,28 +259,18 @@ Resources:
           Fn::Base64: !Sub |
             #!/bin/bash
             yum update -y
-            yum install -y httpd php php-mysql amazon-efs-utils
-            
-            # Mount EFS
-            mkdir -p /var/www/html
-            mount -t efs ${EFSFileSystem}:/ /var/www/html
-            echo "${EFSFileSystem}.efs.${AWS::Region}.amazonaws.com:/ /var/www/html efs defaults,_netdev" >> /etc/fstab
+            yum install -y httpd php php-mysql
             
             # Install WordPress
-            cd /tmp
+            cd /var/www/html
             wget https://wordpress.org/latest.tar.gz
-            tar -xzf latest.tar.gz
+            tar -xzf latest.tar.gz --strip-components=1
             
-            if [ ! -f /var/www/html/wp-config.php ]; then
-              cp -r wordpress/* /var/www/html/
-              cd /var/www/html
-              cp wp-config-sample.php wp-config.php
-              
-              sed -i "s/database_name_here/WPRDSDB25/" wp-config.php
-              sed -i "s/username_here/RDSAdmin/" wp-config.php
-              sed -i "s/password_here/${RDSMasterPassword}/" wp-config.php
-              sed -i "s/localhost/${WordPressDB.Endpoint.Address}/" wp-config.php
-            fi
+            cp wp-config-sample.php wp-config.php
+            sed -i "s/database_name_here/WPRDSDB25/" wp-config.php
+            sed -i "s/username_here/RDSAdmin/" wp-config.php
+            sed -i "s/password_here/${RDSMasterPassword}/" wp-config.php
+            sed -i "s/localhost/${WordPressDB.Endpoint.Address}/" wp-config.php
             
             chown -R apache:apache /var/www/html
             chmod -R 755 /var/www/html
@@ -351,7 +309,3 @@ Outputs:
   WebsiteURL:
     Description: WordPress Website URL
     Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
-  
-  EFSFileSystemId:
-    Description: EFS File System ID
-    Value: !Ref EFSFileSystem
