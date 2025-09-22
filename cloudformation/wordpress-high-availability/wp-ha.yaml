@@ -2,11 +2,6 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'Wordpress High Availability with Autoscaling'
 
 Parameters:
-  VpcCidr:
-    Type: String
-    Default: '10.10.0.0/16'
-    Description: 'The CIDR block for the VPC'
-  
   RDSMasterPassword:
     Type: String
     Description: The password for the RDS master user
@@ -48,7 +43,7 @@ Resources:
   VPC:
     Type: AWS::EC2::VPC
     Properties:
-      CidrBlock: !Ref VpcCidr
+      CidrBlock: "10.10.0.0/16"
       EnableDnsSupport: true
       EnableDnsHostnames: true
       Tags:
@@ -212,7 +207,6 @@ Resources:
       SubnetIds:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
-      Name: !Sub ${AWS::StackName}-vpc-db-subnet-grp
 
   WordPressDB:
     Type: AWS::RDS::DBInstance

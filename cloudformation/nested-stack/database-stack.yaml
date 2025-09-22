@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'RDS Database for WordPress HA'
+
+Parameters:
+  NetworkStackName:
+    Type: String
+    Description: Name of the network stack
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Database password
+  
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+
+Resources:
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS database
+      VpcId: 
+        Fn::ImportValue: !Sub ${NetworkStackName}-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for WordPress instances
+      VpcId: 
+        Fn::ImportValue: !Sub ${NetworkStackName}-VpcId
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for WordPress RDS
+      SubnetIds:
+        - Fn::ImportValue: !Sub ${NetworkStackName}-PrivateSubnet1Id
+        - Fn::ImportValue: !Sub ${NetworkStackName}-PrivateSubnet2Id
+
+  WordPressDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${AWS::StackName}-wordpress-db
+      DBName: wordpress
+      Engine: mysql
+      EngineVersion: 8.0.35
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      MultiAZ: true
+      BackupRetentionPeriod: 7
+      DeletionProtection: false
+
+Outputs:
+  DBEndpoint:
+    Value: !GetAtt WordPressDB.Endpoint.Address
+    Export:
+      Name: !Sub ${AWS::StackName}-DBEndpoint
+  
+  WebServerSecurityGroupId:
+    Value: !Ref WebServerSecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-WebServerSecurityGroupId

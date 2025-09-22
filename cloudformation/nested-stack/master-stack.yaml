@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Master stack for WordPress HA deployment'
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access
+  
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: Database password for WordPress
+  
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: EC2 instance type
+  
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+    Description: RDS instance class
+  
+  TemplateS3Bucket:
+    Type: String
+    Description: S3 bucket containing nested stack templates
+
+Resources:
+  NetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://${TemplateS3Bucket}.s3.amazonaws.com/network-stack.yaml
+      Parameters:
+        VpcCidr: "10.10.0.0/16"
+
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: NetworkStack
+    Properties:
+      TemplateURL: !Sub https://${TemplateS3Bucket}.s3.amazonaws.com/database-stack.yaml
+      Parameters:
+        NetworkStackName: !Ref NetworkStack
+        DBPassword: !Ref DBPassword
+        DBInstanceClass: !Ref DBInstanceClass
+
+  ComputeStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: DatabaseStack
+    Properties:
+      TemplateURL: !Sub https://${TemplateS3Bucket}.s3.amazonaws.com/compute-stack.yaml
+      Parameters:
+        NetworkStackName: !Ref NetworkStack
+        DatabaseStackName: !Ref DatabaseStack
+        KeyName: !Ref KeyName
+        DBPassword: !Ref DBPassword
+        InstanceType: !Ref InstanceType
+
+Outputs:
+  WebsiteURL:
+    Description: WordPress Website URL
+    Value: !Sub 
+      - http://${LoadBalancerDNS}
+      - LoadBalancerDNS: !GetAtt ComputeStack.Outputs.LoadBalancerDNS
+  
+  NetworkStackId:
+    Description: Network Stack ID
+    Value: !Ref NetworkStack
+  
+  DatabaseStackId:
+    Description: Database Stack ID
+    Value: !Ref DatabaseStack
+  
+  ComputeStackId:
+    Description: Compute Stack ID
+    Value: !Ref ComputeStack
